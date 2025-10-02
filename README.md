@@ -5,6 +5,8 @@ This prototype can read legal documents (PDF/Word), perform semantic searches, a
 ## Setup
 ```bash
 python -m venv .venv
+source venv/Scripts/activate
+
 # Windows: .venv\Scripts\activate | Mac/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 
