@@ -166,25 +166,112 @@ def format_timestamp(value: str) -> str:
         return value
     
 
+def describe_structure(hit: Dict) -> str:
+    parts: List[str] = []
+    if hit.get("bab"):
+        title = f"Bab {hit['bab']}"
+        if hit.get("bab_title"):
+            title += f" - {hit['bab_title']}"
+        parts.append(title)
+    if hit.get("bagian"):
+        bagian = f"Bagian {hit['bagian']}"
+        if hit.get("bagian_title"):
+            bagian += f" - {hit['bagian_title']}"
+        parts.append(bagian)
+    if hit.get("paragraf"):
+        paragraf = f"Paragraf {hit['paragraf']}"
+        if hit.get("paragraf_title"):
+            paragraf += f" - {hit['paragraf_title']}"
+        parts.append(paragraf)
+    if hit.get("pasal"):
+        pasal = f"Pasal {hit['pasal']}"
+        if hit.get("ayat"):
+            pasal += f" ayat ({hit['ayat']})"
+        parts.append(pasal)
+    elif hit.get("ayat"):
+        parts.append(f"Ayat ({hit['ayat']})")
+    return " | ".join(parts)
+    
+
+def render_scrape_panel():
+    st.caption("Scrape dokumen dari peraturan.bpk.go.id dan langsung masukkan ke knowledge base.")
+    with st.form("scrape-form"):
+        keyword = st.text_input("Kata kunci peraturan", placeholder="contoh: retribusi parkir")
+        tentang = st.text_input("Tentang (opsional)", placeholder="contoh: pajak daerah")
+        nomor = st.text_input("Nomor peraturan (opsional)", placeholder="contoh: 12/2023")
+        max_docs = st.slider("Jumlah hasil peraturan", 1, 5, 2)
+        downloads_per_doc = st.slider("File per hasil", 1, 5, 1)
+        auto_ingest = st.checkbox("Otomatis ingest & embedding", value=True)
+        scrape_submit = st.form_submit_button("Cari & proses")
+    if scrape_submit:
+        if not keyword:
+            st.warning("Masukkan kata kunci terlebih dahulu.")
+            return
+        payload = {
+            "keyword": keyword,
+            "tentang": tentang or None,
+            "nomor": nomor or None,
+            "max_documents": max_docs,
+            "downloads_per_document": downloads_per_doc,
+            "auto_ingest": auto_ingest,
+        }
+        result = api_post_json("/admin/scrape", payload, timeout=600)
+        if result:
+            docs = result.get("documents", [])
+            st.success(f"Berhasil memproses {len(docs)} peraturan.")
+            for item in docs:
+                title = item.get("title") or "Peraturan"
+                subjects = item.get("subjects") or []
+                with st.expander(title):
+                    if item.get("description"):
+                        st.write(item["description"])
+                    if subjects:
+                        st.caption(", ".join(subjects))
+                    downloads = item.get("downloaded_files") or []
+                    if not downloads:
+                        st.info("Tidak ada file yang dipilih (cek filter/ekstensi).")
+                        continue
+                    for download in downloads:
+                        status = (
+                            f"tersimpan (doc #{download.get('document_id')})"
+                            if download.get("document_id")
+                            else "belum diunggah"
+                        )
+                        chunk_info = (
+                            f", chunk {download.get('chunks_indexed')}"
+                            if download.get("chunks_indexed")
+                            else ""
+                        )
+                        st.markdown(
+                            f"- [{download.get('filename')}]({download.get('url')}) — {status}{chunk_info}"
+                        )
+
+
 def render_admin_dashboard():
     st.subheader("Kelola Knowledge Base")
-    uploaded_files = st.file_uploader(
-        "Unggah dokumen humun (PDF/DOCX)",
-        type=["pdf", "docx"],
-        accept_multiple_files=True,
-        key="admin-uploader",
-    )
-    if st.button("Unggah ke Knowledge Base"):
-        if not uploaded_files:
-            st.warning("Pilih minimal satu dokumen.")
-        else:
-            files_payload = [
-                ("files", (file.name, file.getvalue(), file.type or "application/octet-stream"))
-                for file in uploaded_files
-            ]
-            result = api_post_files("/admin/upload", files_payload)
-            if result:
-                st.success(f"Berhasil mengunggah {len(result)} dokumen.")
+    tab_upload, tab_scrape = st.tabs(["Upload Dokumen", "Scrape JDIH BPK"])
+    
+    with tab_upload:
+        uploaded_files = st.file_uploader(
+            "Unggah dokumen hukum (PDF/DOCX)",
+            type=["pdf", "docx"],
+            accept_multiple_files=True,
+            key="admin-uploader",
+        )
+        if st.button("Unggah ke Knowledge Base", key="upload-btn"):
+            if not uploaded_files:
+                st.warning("Pilih minimal satu dokumen.")
+            else:
+                files_payload = [
+                    ("files", (file.name, file.getvalue(), file.type or "application/octet-stream"))
+                    for file in uploaded_files
+                ]
+                result = api_post_files("/admin/upload", files_payload)
+                if result:
+                    st.success(f"Berhasil mengunggah {len(result)} dokumen.")
+    
+    with tab_scrape:
+        render_scrape_panel()
     
     documents = api_get("/admin/documents") or []
     if documents:
@@ -211,6 +298,8 @@ def render_admin_dashboard():
                 "Uploader": doc.get("uploader_username") or "-",
                 "Tanggal": format_timestamp(doc["uploaded_at"]),
                 "Vector Chunks": doc.get("chunks_indexed", "-"),
+                "Sumber": (doc.get("metadata") or [{}])[0].get("source", "-"),
+                "Metadata": (doc.get("metadata") or [{}])[0].get("data", {}).get("keyword", "-"),
             }
             for doc in documents
         ]
@@ -218,6 +307,61 @@ def render_admin_dashboard():
     else:
         st.info("Belum ada dokumen di knowledge base.")
         
+    
+def render_history_panel():
+    st.subheader("Riwayat Analisis & Insight")
+    history = api_get("/analyses/history") or []
+    if not history:
+        st.info("Belum ada riwayat konsultasi.")
+        return
+    df = pd.DataFrame(history)
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True).dt.tz_convert(None)
+    st.dataframe(
+        df[["question", "classification_label", "created_at"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+    
+    if df["classification_label"].notna().any():
+        agg = (
+            df[df["classification_label"].notna()]
+            .groupby("classification_label")["id"]
+            .count()
+            .reset_index(name="jumlah")
+        )
+        chart = (
+            alt.Chart(agg)
+            .mark_bar()
+            .encode(x="classification_label", y="jumlah", tooltip=["classification_label", "jumlah"])
+            .properties(height=300)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    
+    st.markdown("#### Detail terbaru")
+    for record in history[:5]:
+        created = format_timestamp(record["created_at"])
+        header = f"{created} · {record['question'][:80]}"
+        with st.expander(header):
+            st.markdown(record["answer"])
+            if record.get("classification_label"):
+                st.caption(
+                    f"Kategori: **{record['classification_label']}** "
+                    f"(skor ~{(record.get('classification_score') or 0):.2f})"
+                )
+            if st.button("Muat jawaban ini", key=f"use-history-{record['id']}"):
+                st.session_state.last_question = record["question"]
+                st.session_state.last_answer = record["answer"]
+                st.session_state.last_mode = record["mode"]
+                st.session_state.last_hits = record.get("contexts") or []
+                if record.get("classification_label"):
+                    st.session_state.last_classification = {
+                        "label": record["classification_label"],
+                        "score": record.get("classification_score") or 0.0,
+                    }
+                else:
+                    st.session_state.last_classification = None
+                st.success("Riwayat dimuat ke panel jawaban.")
+    
     
 
 def render_chat_interface(use_llm: bool, top_k: int):
@@ -266,6 +410,9 @@ def render_chat_interface(use_llm: bool, top_k: int):
                 source = hit.get("doc_id") or hit.get("source", "-")
                 st.markdown(f"**{idx}. {source}**{location}{score_text}")
                 st.write(hit.get("text", "")[:1000])
+                structure = describe_structure(hit)
+                if structure:
+                    st.caption(structure)
                 
         
         pdf_bytes = make_pdf_report(
@@ -302,7 +449,11 @@ def render_dashboard():
         render_admin_dashboard()
         st.markdown("---")
         
-    render_chat_interface(use_llm_val, top_k_val)
+    tab_chat, tab_history = st.tabs(["AI Konsultasi", "Riwayat & Insight"])
+    with tab_chat:
+        render_chat_interface(use_llm_val, top_k_val)
+    with tab_history:
+        render_history_panel()
     
     
 

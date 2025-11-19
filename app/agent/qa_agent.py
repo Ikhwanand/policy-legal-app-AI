@@ -5,6 +5,9 @@ import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass
@@ -22,7 +25,22 @@ def simple_extractive_answer(query: str, contexts: List[Dict], top_n: int = 3) -
     lines = [f"**Pertanyaan:** {query}", "", "**Ringkasan Konteks Terkait:**"]
     for i, context in enumerate(contexts[:top_n], 1):
         snippet = context.get("text", "")[:600]
-        lines.append(f"{i}. {snippet}")
+        source = context.get("doc_id") or context.get("source") or "-"
+        structure_bits = []
+        if context.get("pasal"):
+            label = f"Pasal {context['pasal']}"
+            if context.get("ayat"):
+                label += f" ayat ({context['ayat']})"
+            structure_bits.append(label)
+        elif context.get("ayat"):
+            structure_bits.append(f"Ayat ({context['ayat']})")
+        if context.get("bab"):
+            label = f"Bab {context['bab']}"
+            if context.get("bab_title"):
+                label += f" - {context['bab_title']}"
+            structure_bits.append(label)
+        structure_text = f" ({' | '.join(structure_bits)})" if structure_bits else ""
+        lines.append(f"{i}. **{source}**{structure_text} — {snippet}")
     lines.append("")
     lines.append("_Catatan: ini jawaban berbasis konteks (tanpa LLM). Aktifkan LLM untuk jawaban generatif._")
     return "\n".join(lines)
@@ -48,6 +66,8 @@ def llm_answer_with_agno(query: str, contexts: List[Dict]) -> str:
 
     if not os.getenv("GOOGLE_API_KEY"):
         raise RuntimeError("GOOGLE_API_KEY tidak ditemukan")
+    
+  
 
     context_text = "\n\n".join([c.get("text", "") for c in contexts[:6]])
     system_instructions = (
@@ -58,7 +78,7 @@ def llm_answer_with_agno(query: str, contexts: List[Dict]) -> str:
     )
 
     agent = Agent(
-        model=Gemini(id="gemini-2.0-flash-exp"),
+        model=Gemini(id='gemini-2.0-flash', api_key=os.getenv("GOOGLE_API_KEY")),
         instructions=system_instructions,
         markdown=True,
         tools=[

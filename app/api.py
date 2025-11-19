@@ -1,16 +1,17 @@
 import logging
 import shutil
 from pathlib import Path
-from typing import List 
+from typing import Any, Dict, List 
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.agent.qa_agent import answer_query
-from app.models.classifier import LABELS, fit_and_save, load_model, predict
-from app.utils.report import make_markdown_report
+from app.models.classifier import ensure_default_model, load_model, predict
+from app.nlp.peraturan_scraper import download_file as scraper_download_file, search_peraturan
 
 from app.backend import auth, models, schemas
 from app.backend.db import Base, SessionLocal, engine, get_db
@@ -29,6 +30,7 @@ for path in (STORAGE_DIR, INDEX_DIR, UPLOADS_DIR):
     path.mkdir(parents=True, exist_ok=True)
     
 knowledge = KnowledgeStore(index_dir=INDEX_DIR, uploads_dir=UPLOADS_DIR)
+SCRAPER_ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 
 
 app = FastAPI(title="Sumbawa AI Legal Dashboard")
@@ -149,6 +151,17 @@ async def upload_documents(
             uploaded_by=current_user.id,
         )
         db.add(document)
+        db.flush()
+        db.add(
+            models.DocumentMetadata(
+                document_id=document.id,
+                source="manual",
+                data={
+                    "ingest_type": "upload",
+                    "original_filename": file.filename,
+                },
+            )
+        )
         db.commit()
         db.refresh(document)
         
@@ -164,6 +177,83 @@ async def upload_documents(
             )
         )
     return results 
+
+
+@app.post("/admin/scrape", response_model=schemas.ScrapeResponse)
+def scrape_peraturan(
+    payload: schemas.ScrapeRequest,
+    current_user: models.User = Depends(auth.require_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        search_results = search_peraturan(
+            payload.keyword,
+            limit=payload.max_documents,
+            tentang=payload.tentang,
+            nomor=payload.nomor,
+        )
+    except Exception as exc:  # pragma: no cover - HTTP errors
+        logger.exception("Failed to scrape peraturan.bpk.go.id: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Gagal mengakses peraturan.bpk.go.id: {exc}") from exc
+    
+    documents_payload: List[schemas.ScrapedDocument] = []
+    for result in search_results:
+        download_infos: List[Dict] = []
+        for download in result.downloads[: payload.downloads_per_document]:
+            info_payload: Dict[str, Any] = {
+                "label": download.label,
+                "url": download.url,
+                "filename": download.filename,
+            }
+            if payload.auto_ingest:
+                suffix = Path(download.filename).suffix.lower()
+                if suffix and suffix not in SCRAPER_ALLOWED_EXTENSIONS:
+                    logger.info("Skip %s (unsupported extension %s)", download.filename, suffix)
+                    continue
+                stored_name = f"{uuid4().hex}_{_sanitize_filename(download.filename)}"
+                destination = UPLOADS_DIR / stored_name
+                try:
+                    scraper_download_file(download.url, destination)
+                except Exception as exc:  # pragma: no cover - network errors
+                    logger.warning("Failed to download %s: %s", download.url, exc)
+                    continue
+                chunks_indexed = knowledge.add_file(file_path=destination, doc_id=result.title or download.filename)
+                document = models.Document(
+                    original_filename=download.filename or result.title or stored_name,
+                    stored_filename=stored_name,
+                    uploaded_by=current_user.id,
+                )
+                db.add(document)
+                db.flush()
+                db.add(
+                    models.DocumentMetadata(
+                        document_id=document.id,
+                        source="bpk_scraper",
+                        data={
+                            "keyword": payload.keyword,
+                            "title": result.title,
+                            "detail_url": result.detail_url,
+                            "subjects": result.subjects,
+                            "download_label": download.label,
+                            "download_url": download.url,
+                        },
+                    )
+                )
+                db.commit()
+                db.refresh(document)
+                info_payload["document_id"] = document.id
+                info_payload["chunks_indexed"] = chunks_indexed
+            download_infos.append(info_payload)
+        documents_payload.append(
+            schemas.ScrapedDocument(
+                title=result.title,
+                description=result.description,
+                subjects=result.subjects,
+                detail_url=result.detail_url,
+                downloaded_files=download_infos,
+            )
+        )
+    return schemas.ScrapeResponse(keyword=payload.keyword, documents=documents_payload)
 
 
 @app.get("/admin/documents", response_model=List[schemas.DocumentInfo])
@@ -182,6 +272,10 @@ def list_documents(
                 uploaded_at=doc.uploaded_at,
                 uploaded_by=doc.uploaded_by,
                 uploader_username=doc.uploader.username if doc.uploader else None,
+                metadata=[
+                    schemas.DocumentMetadataInfo(source=meta.source, data=meta.data)
+                    for meta in doc.metadata_entries
+                ],
             )
         )
     return payload
@@ -190,7 +284,8 @@ def list_documents(
 @app.post("/chat/ask", response_model=schemas.ChatResponse)
 def ask_ai(
     payload: schemas.ChatRequest,
-    _: models.User = Depends(auth.get_current_user),
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
 ):
     if knowledge.is_empty():
         raise HTTPException(status_code=400, detail="Knowledge base is empty. Admin needs to upload documents.")
@@ -202,13 +297,7 @@ def ask_ai(
     qa_result = answer_query(payload.question, hits, use_llm=payload.use_llm)
     
     classification = None 
-    model = load_model()
-    if model is None:
-        texts = [hit["text"] for hit in hits]
-        labels = [LABELS[i % len(LABELS)] for i in range(len(texts))]
-        if texts:
-            fit_and_save(texts, labels)
-            model = load_model()
+    model = load_model() or ensure_default_model()
     
     if model:
         pred = predict(" ".join(hit["text"] for hit in hits[:3]), model)
@@ -223,16 +312,68 @@ def ask_ai(
             page=hit.get("page"),
             section=hit.get("section"),
             section_chunk=hit.get("section_chunk"),
+            structured_section=hit.get("structured_section"),
+            bab=hit.get("bab"),
+            bab_title=hit.get("bab_title"),
+            bagian=hit.get("bagian"),
+            bagian_title=hit.get("bagian_title"),
+            paragraf=hit.get("paragraf"),
+            paragraf_title=hit.get("paragraf_title"),
+            pasal=hit.get("pasal"),
+            ayat=hit.get("ayat"),
         )
         for hit in hits
     ]
     
-    return schemas.ChatResponse(
+    response_payload = schemas.ChatResponse(
         answer=qa_result.answer,
         mode=qa_result.mode,
         context=context_payload,
         classification=classification,
     )
+    
+    analysis_record = models.AnalysisRecord(
+        question=payload.question,
+        answer=qa_result.answer,
+        mode=qa_result.mode,
+        classification_label=classification.label if classification else None,
+        classification_score=classification.score if classification else None,
+        user_id=current_user.id,
+        contexts=jsonable_encoder(context_payload),
+    )
+    db.add(analysis_record)
+    db.commit()
+    
+    return response_payload
+    
+    
+@app.get("/analyses/history", response_model=List[schemas.AnalysisRecordResponse])
+def list_analysis_history(
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    query = db.query(models.AnalysisRecord).order_by(models.AnalysisRecord.created_at.desc())
+    if current_user.role != "admin":
+        query = query.filter(models.AnalysisRecord.user_id == current_user.id)
+    records = query.limit(limit).all()
+    payload: List[schemas.AnalysisRecordResponse] = []
+    for record in records:
+        contexts = record.contexts or []
+        payload.append(
+            schemas.AnalysisRecordResponse(
+                id=record.id,
+                question=record.question,
+                answer=record.answer,
+                mode=record.mode,
+                classification_label=record.classification_label,
+                classification_score=record.classification_score,
+                created_at=record.created_at,
+                user_id=record.user_id,
+                contexts=[schemas.ContextHit(**ctx) for ctx in contexts],
+            )
+        )
+    return payload
     
     
     

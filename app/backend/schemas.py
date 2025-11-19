@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -37,6 +37,11 @@ class UserCreate(BaseModel):
     role: str = Field(default="user")
     
 
+class DocumentMetadataInfo(BaseModel):
+    source: str 
+    data: Optional[Dict[str, Any]] = None
+
+
 class DocumentInfo(BaseModel):
     id: int 
     original_filename: str 
@@ -44,6 +49,7 @@ class DocumentInfo(BaseModel):
     uploaded_at: datetime
     uploaded_by: int 
     uploader_username: Optional[str] = None 
+    metadata: Optional[List[DocumentMetadataInfo]] = None 
     
     class Config:
         orm_mode = True 
@@ -67,6 +73,15 @@ class ContextHit(BaseModel):
     page: Optional[int] = None 
     section: Optional[int] = None 
     section_chunk: Optional[int] = None 
+    structured_section: Optional[int] = None 
+    bab: Optional[str] = None 
+    bab_title: Optional[str] = None 
+    bagian: Optional[str] = None 
+    bagian_title: Optional[str] = None 
+    paragraf: Optional[str] = None 
+    paragraf_title: Optional[str] = None 
+    pasal: Optional[str] = None 
+    ayat: Optional[str] = None 
     
     
 
@@ -87,4 +102,48 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str = Field(min_length=6)
     
+
+class AnalysisRecordResponse(BaseModel):
+    id: int 
+    question: str 
+    answer: str 
+    mode: str 
+    classification_label: Optional[str] = None 
+    classification_score: Optional[float] = None 
+    created_at: datetime 
+    user_id: int 
+    contexts: Optional[List[ContextHit]] = None 
+    
+    class Config:
+        orm_mode = True 
+
+
+class ScrapeRequest(BaseModel):
+    keyword: str = Field(min_length=3)
+    tentang: Optional[str] = Field(default=None)
+    nomor: Optional[str] = Field(default=None)
+    max_documents: int = Field(default=1, ge=1, le=10)
+    downloads_per_document: int = Field(default=1, ge=1, le=5)
+    auto_ingest: bool = Field(default=True)
+
+
+class DownloadInfo(BaseModel):
+    label: str
+    url: str
+    filename: str
+    document_id: Optional[int] = None
+    chunks_indexed: Optional[int] = None
+
+
+class ScrapedDocument(BaseModel):
+    title: str
+    description: Optional[str] = None
+    subjects: List[str] = Field(default_factory=list)
+    detail_url: Optional[str] = None
+    downloaded_files: List[DownloadInfo] = Field(default_factory=list)
+
+
+class ScrapeResponse(BaseModel):
+    keyword: str
+    documents: List[ScrapedDocument]
     

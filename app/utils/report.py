@@ -15,6 +15,18 @@ def _format_location(hit: Dict) -> str:
         parts.append(f"paragraf {hit['section']}")
     if hit.get("section_chunk"):
         parts.append(f"bagian {hit['section_chunk']}")
+    if hit.get("bab"):
+        title = f"Bab {hit['bab']}"
+        if hit.get("bab_title"):
+            title += f" - {hit['bab_title']}"
+        parts.append(title)
+    if hit.get("pasal"):
+        pasal_text = f"Pasal {hit['pasal']}"
+        if hit.get("ayat"):
+            pasal_text += f" ayat ({hit['ayat']})"
+        parts.append(pasal_text)
+    elif hit.get("ayat"):
+        parts.append(f"Ayat ({hit['ayat']})")
     return ", ".join(parts)
 
 

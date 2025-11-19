@@ -1,63 +1,81 @@
-# AI Legal/Policy Agent — Interactive Dashboard (Prototype)
+# AI Legal/Policy Agent - Interactive Dashboard (Prototype)
 
-This prototype can read legal documents (PDF/Word), perform semantic searches, answer policy questions, classify simple impacts, and generate reports. It's suitable for demos to regional apparatus organizations or leaders.
+Prototype dashboard untuk Pemerintah Kabupaten Sumbawa yang membaca dokumen hukum (PDF/DOCX), melakukan pencarian semantik, menjawab isu kebijakan, mengklasifikasikan dampak, serta menghasilkan laporan yang dapat diunduh. Seluruh alur berjalan lokal dan memanfaatkan Agno Agent untuk reasoning generatif.
 
 ## Setup
 ```bash
 python -m venv .venv
 source venv/Scripts/activate
-
 # Windows: .venv\Scripts\activate | Mac/Linux: source .venv/bin/activate
+
 pip install -r requirements.txt
 
-# Run the API first, make sure you in outside the app folder
+# Jalankan API (posisi folder root, bukan di dalam app/)
 uvicorn app.api:app --reload
 
-# RUn the streamlit app
+# Jalankan dashboard Streamlit
 streamlit run app/app.py
 ```
 
 ## Notes
-- Supported formats: .pdf / .docx.
-- The embedding model will be downloaded on the first run (requires an internet connection).
-- The FAISS index and ML model are stored in the `storage/` folder.
+- Format yang didukung: `.pdf` dan `.docx`.
+- Model embedding akan otomatis diunduh saat pertama kali dijalankan (butuh koneksi internet).
+- File unggahan, index FAISS, dan database SQLite tersimpan di `app/storage/`.
+- Kredensial admin default diatur lewat `.env` (`DEFAULT_ADMIN_USERNAME`, `DEFAULT_ADMIN_PASSWORD`, `DEFAULT_ADMIN_EMAIL`).
+- Dataset contoh untuk klasifikasi isu berada di `app/models/impact_training_samples.json` dan dipakai otomatis ketika model belum tersedia.
+
+## Fitur SIKAP 2025
+1. **Ekstraksi struktur regulasi** di `app/nlp/ingest.py` menandai Bab/Bagian/Paragraf/Pasal/Ayat secara rule-based sehingga referensi pasal muncul di dashboard dan laporan PDF.
+2. **Scraping JDIH BPK** langsung dari dashboard admin. Cukup masukkan kata kunci, jumlah hasil, dan jumlah file. Sistem mengunduh PDF/DOCX dari https://peraturan.bpk.go.id, menyimpannya ke storage, lalu mengindeks ke FAISS.
+3. **Riwayat & insight** menyimpan setiap konsultasi dalam tabel `analyses` lengkap dengan konteks dan skor klasifikasi. Tab khusus menampilkan tabel kronologis, chart distribusi isu, serta tombol untuk memuat ulang jawaban sebelumnya.
+4. **Klasifikasi dengan optimasi** memakai grid-search (Random Forest vs. SVM) + cross-validation untuk memilih model terbaik sebelum disimpan ke `app/storage/impact_classifier.pkl`.
+5. **Agno RAG Agent** tetap menjadi core reasoning (menggunakan model NVIDIA / Gemini) dengan fallback extractive serta konteks beranotasi struktur hukum.
+6. **Pelaporan otomatis**: tombol unduh PDF menyertakan Bab/Pasal/Ayat pada setiap referensi konteks.
+
+## Scraping Peraturan BPK
+1. Login sebagai admin di Streamlit.
+2. Buka tab **Scrape JDIH BPK**, isi kata kunci pencarian, jumlah peraturan yang ingin diambil, dan jumlah file per peraturan.
+3. Aktifkan opsi *Otomatis ingest & embedding* bila ingin langsung dimasukkan ke knowledge base.
+4. Tekan **Cari & proses**. Hasil scrape akan menampilkan daftar file beserta status penyimpanan dan jumlah chunk vektor.
+5. Dokumen yang berhasil otomatis muncul pada tabel dokumen admin dan siap dipakai untuk konsultasi.
+
+## Riwayat & Insight
+- Tab **Riwayat & Insight** menampilkan tabel pertanyaan terbaru, grafik distribusi kategori impact, serta daftar detail rekomendasi.
+- Tombol **Muat jawaban ini** pada setiap histori akan mengisi ulang panel konsultasi beserta konteks, sehingga pimpinan dapat meninjau/mengunduh ulang tanpa menunggu inferensi baru.
 
 ## Future Development
-- Extraction of legal structures (articles/clauses) + document metadata.
-- Cross-validation & hyperparameter tuning for the classification model.
-- Recommendation reasoning + impact scoring (qualitative → quantitative).
-- Export reports to PDF (currently markdown/HTML).
-- Role-based access (Admin vs. Head of Regional Apparatus Organization).
+- Skor dampak kuantitatif dan reasoning multi-skenario (mis. best case vs worst case).
+- Ekspor laporan multi-format (PDF + DOCX) dengan lampiran pasal.
+- Active learning UI agar admin dapat memberi label ulang hasil klasifikasi dan melakukan retraining langsung dari dashboard.
+- Integrasi Role-Based Access Control (RBAC) untuk membedakan hak akses admin vs pimpinan OPD.
 
 ## Workflow Explanation
 
 ### Upload & Indexing
-1.  **Upload Document**: The user uploads a PDF/DOCX file from the dashboard.
-2.  **Save to Folder**: The file is securely saved in the `data/` directory using `pathlib`.
-3.  **Ingest & Chunking**: The text is extracted and split into smaller chunks.
-4.  **Embedding**: The chunks are converted into vector embeddings (using Hugging Face / Ollama).
-5.  **Vector DB (FAISS)**: The embeddings and metadata are stored.
+1. **Upload Document**: pengguna mengunggah PDF/DOCX atau menarik dari JDIH BPK.
+2. **Save to Folder**: file disimpan ke `app/storage/uploads`.
+3. **Ingest & Structuring**: teks diekstraksi lalu parser mendeteksi Bab/Pasal/Ayat.
+4. **Embedding**: chunk teks diubah menjadi vektor (Sentence Transformers).
+5. **Vector DB (FAISS)**: embedding + metadata disimpan untuk pencarian semantik.
 
 ### Query & Answering
-1.  **User Query**: The user enters a question on the dashboard.
-2.  **Query Embedding**: The question is converted into an embedding using the same model.
-3.  **Semantic Search**: FAISS finds the most relevant Top-K contexts.
-4.  **QA Agent**:
-    *   **Mode 1: Extractive Answer** (without LLM, free).
-    *   **Mode 2: Generative Answer** (LLM: OpenAI / Gemini / Ollama).
-5.  **Display Answer**: The answer is displayed on the dashboard, with references to the source document.
+1. **User Query**: pengguna memasukkan pertanyaan pada dashboard.
+2. **Query Embedding**: pertanyaan di-embedding dengan model yang sama.
+3. **Semantic Search**: FAISS mencari konteks Top-K yang paling relevan.
+4. **QA Agent**:
+   - Mode 1: Extractive (tanpa LLM, gratis).
+   - Mode 2: Generative (Agno Agent + NVIDIA/Gemini) dengan reasoning dan referensi.
+5. **Display Answer**: jawaban + referensi pasal ditampilkan, bisa diunduh sebagai PDF.
 
-## Version 1 — With LLM (RAG + Generative Answer)
-
-This flowchart illustrates the complete process, from document upload to generating an answer using a Large Language Model (LLM). This approach, known as Retrieval-Augmented Generation (RAG), combines semantic search with the generative capabilities of an LLM to provide comprehensive answers.
+## Version 1 - With LLM (RAG + Generative Answer)
 
 ```mermaid
 flowchart TD
     subgraph Upload_&_Indexing
         A[Upload Document (PDF/DOCX) - Streamlit]
-        B[Save to data/ folder (pathlib)]
-        C[Ingest & Chunking (app/nlp/ingest.py)]
-        D[Embedding (HF/Ollama)]
+        B[Save to storage/uploads (pathlib)]
+        C[Ingest & Structuring (app/nlp/ingest.py)]
+        D[Embedding (Sentence Transformers)]
         E[(FAISS Index + Metadata) storage/]
     end
 
@@ -65,8 +83,8 @@ flowchart TD
         F[User Query (Streamlit input)]
         G[Query Embedding (same model)]
         H[Semantic Search Top-K contexts]
-        I[QA Agent (app/agent/qa_agent.py)\n→ Prompt = Query + Contexts]
-        J[LLM Generation (OpenAI/Gemini/Ollama)]
+        I[QA Agent (app/agent/qa_agent.py)\n+ Prompt = Query + Contexts]
+        J[LLM Generation (Agno + NVIDIA/Gemini)]
         K[Answer + References (Dashboard)]
         L[[Download Report]]
     end
@@ -76,15 +94,13 @@ flowchart TD
     E-->H
 ```
 
-## Version 2 — Without LLM (Pure Extractive)
-
-This flowchart shows a simplified, cost-effective version that operates without a Large Language Model (LLM). Instead of generating new text, this approach extracts and summarizes the most relevant information directly from the source documents. It's a pure extractive method that is faster and free of LLM-related costs.
+## Version 2 - Without LLM (Pure Extractive)
 
 ```mermaid
 flowchart TD
     subgraph Upload_&_Indexing
         A[Upload Document]
-        B[Save to data/]
+        B[Save to storage/uploads]
         C[Ingest & Chunking]
         D[Embedding]
         E[(FAISS Index)]
@@ -105,16 +121,10 @@ flowchart TD
 ```
 
 ## app/ Directory Structure
-
-The `app/` directory contains the main source code for this AI Legal/Policy Agent dashboard:
-
-- `agent/` — Contains the QA (Question Answering) agent module responsible for context retrieval and answering user queries.
-- `nlp/` — Natural Language Processing modules for document extraction, chunking, and embedding.
-- `models/` — Impact classification models and related files.
-- `utils/` — Utility functions such as report generation.
-- `storage/` — Stores models, FAISS index, metadata, and uploaded documents.
-- `app.py` — The entry point for the interactive dashboard application built with Streamlit.
-- `backend/` — Contains the API code for handling document uploads, queries, and other backend operations.
-
-Each folder plays a specific role in the workflow: from document upload, text processing, semantic search, to presenting answers and reports to users.
-
+- `agent/` – modul QA (RAG + Agno) beserta cache jawaban.
+- `backend/` – FastAPI (auth, upload, scraping, history, DB models).
+- `models/` – pipeline klasifikasi, sample dataset, dan penyimpanan model.
+- `nlp/` – ekstraksi dokumen, chunking, embedding, dan scraper JDIH BPK.
+- `storage/` – database SQLite, FAISS index, model terlatih, dan file unggahan.
+- `utils/` – utilitas laporan PDF/markdown.
+- `app.py` – entry point Streamlit (UI dashboard & insight).
